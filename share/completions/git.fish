@@ -22,6 +22,10 @@ function __fish_git_modified_files
   command git ls-files -m --exclude-standard ^/dev/null
 end
 
+function __fish_git_staged_files
+  command git diff --staged --name-only ^/dev/null
+end
+
 function __fish_git_add_files
   command git ls-files -mo --exclude-standard ^/dev/null
 end
@@ -233,6 +237,7 @@ complete -f -c git -n '__fish_git_needs_command' -a clone -d 'Clone a repository
 ### commit
 complete -c git -n '__fish_git_needs_command'    -a commit -d 'Record changes to the repository'
 complete -c git -n '__fish_git_using_command commit' -l amend -d 'Amend the log message of the last commit'
+complete -f -c git -n '__fish_git_using_command commit' -a '(__fish_git_modified_files)'
 # TODO options
 
 ### diff
@@ -355,7 +360,8 @@ complete -f -c git -n '__fish_git_using_command rebase' -l no-ff -d 'No fast-for
 ### reset
 complete -c git -n '__fish_git_needs_command'    -a reset -d 'Reset current HEAD to the specified state'
 complete -f -c git -n '__fish_git_using_command reset' -l hard -d 'Reset files in working directory'
-complete -c git -n '__fish_git_using_command reset' -a '(__fish_git_branches)'
+complete -c git -n '__fish_git_using_command reset' -a '(__fish_git_branches)' -d 'Branch'
+complete -f -c git -n '__fish_git_using_command reset' -a '(__fish_git_staged_files)' -d 'File'
 # TODO options
 
 ### revert
@@ -392,8 +398,8 @@ complete -f -c git -n '__fish_git_using_command tag' -s d -l delete -d 'Remove a
 complete -f -c git -n '__fish_git_using_command tag' -s v -l verify -d 'Verify signature of a tag'
 complete -f -c git -n '__fish_git_using_command tag' -s f -l force -d 'Force overwriting exising tag'
 complete -f -c git -n '__fish_git_using_command tag' -s l -l list -d 'List tags'
-complete -f -c git -n '__fish_contains_opt -s d' -a '(__fish_git_tags)' -d 'Tag'
-complete -f -c git -n '__fish_contains_opt -s v' -a '(__fish_git_tags)' -d 'Tag'
+complete -f -c git -n '__fish_git_using_command tag; and __fish_contains_opt -s d' -a '(__fish_git_tags)' -d 'Tag'
+complete -f -c git -n '__fish_git_using_command tag; and __fish_contains_opt -s v' -a '(__fish_git_tags)' -d 'Tag'
 # TODO options
 
 ### stash

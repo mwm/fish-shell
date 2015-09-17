@@ -138,16 +138,10 @@ size_t parse_util_get_offset_from_line(const wcstring &str, int line);
 size_t parse_util_get_offset(const wcstring &str, int line, long line_offset);
 
 /**
-   Set the argv environment variable to the specified null-terminated
-   array of strings.
+   Return the given string, unescaping wildcard characters but not performing
+   any other character transformation.
 */
-void parse_util_set_argv(const wchar_t * const *argv, const wcstring_list_t &named_arguments);
-
-/**
-   Make a duplicate of the specified string, unescape wildcard
-   characters but not performing any other character transformation.
-*/
-wchar_t *parse_util_unescape_wildcards(const wchar_t *in);
+wcstring parse_util_unescape_wildcards(const wcstring &in);
 
 /**
    Checks if the specified string is a help option.

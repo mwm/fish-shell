@@ -561,111 +561,41 @@ void parse_util_token_extent(const wchar_t *buff,
 
 }
 
-void parse_util_set_argv(const wchar_t * const *argv, const wcstring_list_t &named_arguments)
+wcstring parse_util_unescape_wildcards(const wcstring &str)
 {
-    if (*argv)
+    wcstring result;
+    result.reserve(str.size());
+    
+    const wchar_t * const cs = str.c_str();
+    for (size_t i=0; cs[i] != L'\0'; i++)
     {
-        const wchar_t * const *arg;
-        wcstring sb;
-
-        for (arg=argv; *arg; arg++)
+        if (cs[i] == L'*')
         {
-            if (arg != argv)
-            {
-                sb.append(ARRAY_SEP_STR);
-            }
-            sb.append(*arg);
+            result.push_back(ANY_STRING);
         }
-
-        env_set(L"argv", sb.c_str(), ENV_LOCAL);
-    }
-    else
-    {
-        env_set(L"argv", 0, ENV_LOCAL);
-    }
-
-    if (! named_arguments.empty())
-    {
-        const wchar_t * const *arg;
-        size_t i;
-        for (i=0, arg=argv; i < named_arguments.size(); i++)
+        else if (cs[i] == L'?')
         {
-            env_set(named_arguments.at(i).c_str(), *arg, ENV_LOCAL | ENV_USER);
-
-            if (*arg)
-                arg++;
+            result.push_back(ANY_CHAR);
+        }
+        else if (cs[i] == L'\\' && (cs[i+1] == L'*' || cs[i+1] == L'?'))
+        {
+            result.push_back(cs[i+1]);
+            i += 1;
+        }
+        else if (cs[i] == L'\\' && cs[i+1] == L'\\')
+        {
+            // Not a wildcard, but ensure the next iteration
+            // doesn't see this escaped backslash
+            result.append(L"\\\\");
+            i += 1;
+        }
+        else
+        {
+            result.push_back(cs[i]);
         }
     }
+    return result;
 }
-
-wchar_t *parse_util_unescape_wildcards(const wchar_t *str)
-{
-    wchar_t *in, *out;
-    wchar_t *unescaped;
-
-    CHECK(str, 0);
-
-    unescaped = wcsdup(str);
-
-    if (!unescaped)
-    {
-        DIE_MEM();
-    }
-
-    for (in=out=unescaped; *in; in++)
-    {
-        switch (*in)
-        {
-            case L'\\':
-            {
-                switch (*(in + 1))
-                {
-                    case L'*':
-                    case L'?':
-                    {
-                        in++;
-                        *(out++)=*in;
-                        break;
-                    }
-                    case L'\\':
-                    {
-                        in++;
-                        *(out++)=L'\\';
-                        *(out++)=L'\\';
-                        break;
-                    }
-                    default:
-                    {
-                        *(out++)=*in;
-                        break;
-                    }
-                }
-                break;
-            }
-
-            case L'*':
-            {
-                *(out++)=ANY_STRING;
-                break;
-            }
-
-            case L'?':
-            {
-                *(out++)=ANY_CHAR;
-                break;
-            }
-
-            default:
-            {
-                *(out++)=*in;
-                break;
-            }
-        }
-    }
-    *out = *in;
-    return unescaped;
-}
-
 
 /**
    Find the outermost quoting style of current token. Returns 0 if

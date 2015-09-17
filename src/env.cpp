@@ -472,10 +472,10 @@ void env_init(const struct config_paths_t *paths /* or NULL */)
     /* Set the given paths in the environment, if we have any */
     if (paths != NULL)
     {
-        env_set(FISH_DATADIR_VAR, paths->data.c_str(), ENV_GLOBAL | ENV_EXPORT);
-        env_set(FISH_SYSCONFDIR_VAR, paths->sysconf.c_str(), ENV_GLOBAL | ENV_EXPORT);
-        env_set(FISH_HELPDIR_VAR, paths->doc.c_str(), ENV_GLOBAL | ENV_EXPORT);
-        env_set(FISH_BIN_DIR, paths->bin.c_str(), ENV_GLOBAL | ENV_EXPORT);
+        env_set(FISH_DATADIR_VAR, paths->data.c_str(), ENV_GLOBAL);
+        env_set(FISH_SYSCONFDIR_VAR, paths->sysconf.c_str(), ENV_GLOBAL);
+        env_set(FISH_HELPDIR_VAR, paths->doc.c_str(), ENV_GLOBAL);
+        env_set(FISH_BIN_DIR, paths->bin.c_str(), ENV_GLOBAL);
     }
 
     /*
@@ -1352,6 +1352,30 @@ const char * const *env_export_arr(bool recalc)
     ASSERT_IS_MAIN_THREAD();
     update_export_array_if_necessary(recalc);
     return export_array.get();
+}
+
+void env_set_argv(const wchar_t * const * argv)
+{
+    if (*argv)
+    {
+        const wchar_t * const *arg;
+        wcstring sb;
+
+        for (arg=argv; *arg; arg++)
+        {
+            if (arg != argv)
+            {
+                sb.append(ARRAY_SEP_STR);
+            }
+            sb.append(*arg);
+        }
+
+        env_set(L"argv", sb.c_str(), ENV_LOCAL);
+    }
+    else
+    {
+        env_set(L"argv", 0, ENV_LOCAL);
+    }
 }
 
 env_vars_snapshot_t::env_vars_snapshot_t(const wchar_t * const *keys)

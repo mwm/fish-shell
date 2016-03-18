@@ -74,7 +74,7 @@ class scoped_buffer_t
     int (* const old_writer)(char);
 
 public:
-    scoped_buffer_t(data_buffer_t *buff) : old_buff(s_writeb_buffer), old_writer(output_get_writer())
+    explicit scoped_buffer_t(data_buffer_t *buff) : old_buff(s_writeb_buffer), old_writer(output_get_writer())
     {
         s_writeb_buffer = buff;
         output_set_writer(s_writeb);
@@ -1448,6 +1448,7 @@ void s_reset(screen_t *s, screen_reset_mode_t mode)
         // now we are certainly on a new line. But we may have dropped the omitted newline char on it. So append enough spaces to overwrite the omitted newline char, and then
         abandon_line_string.append(non_space_width, L' ');
         abandon_line_string.push_back(L'\r');
+        abandon_line_string.append(L"\x1b[2K"); //clear all the spaces from the new line
 
         const std::string narrow_abandon_line_string = wcs2string(abandon_line_string);
         write_loop(STDOUT_FILENO, narrow_abandon_line_string.c_str(), narrow_abandon_line_string.size());

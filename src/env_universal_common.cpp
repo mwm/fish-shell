@@ -129,7 +129,7 @@ static int check_runtime_path(const char * path)
      */
 
     struct stat statpath;
-    u_int uid = geteuid();
+    uid_t uid = geteuid();
 
     if (mkdir(path, S_IRWXU) != 0 && errno != EEXIST)
         return errno;
@@ -147,7 +147,12 @@ static wcstring get_runtime_path()
 {
     wcstring result;
     const char *dir = getenv("XDG_RUNTIME_DIR");
-    if (dir != NULL)
+
+    // Check that the path is actually usable
+    // Technically this is guaranteed by the fdo spec but in practice
+    // it is not always the case: see #1828 and #2222
+    int mode = R_OK | W_OK | X_OK;
+    if (dir != NULL && access(dir, mode) == 0 && check_runtime_path(dir) == 0)
     {
         result = str2wcstring(dir);
     }
@@ -333,7 +338,7 @@ env_var_t env_universal_t::get(const wcstring &name) const
     var_table_t::const_iterator where = vars.find(name);
     if (where != vars.end())
     {
-        result = where->second.val;
+        result = env_var_t(where->second.val);
     }
     return result;
 }
@@ -803,6 +808,11 @@ bool env_universal_t::sync(callback_data_list_t *callbacks)
     Prior versions of fish used a hard link scheme to support file locking on lockless NFS. The risk here is that if the process crashes or is killed while holding the lock, future instances of fish will not be able to obtain it. This seems to be a greater risk than that of data loss on lockless NFS. Users who put their home directory on lockless NFS are playing with fire anyways.
     */
     const wcstring &vars_path = explicit_vars_path.empty() ? default_vars_path() : explicit_vars_path;
+
+    if (vars_path.empty()) {
+        debug(2, "No universal variable path available");
+        return false;
+    }
     
     /* If we have no changes, just load */
     if (modified.empty())
@@ -849,22 +859,24 @@ bool env_universal_t::sync(callback_data_list_t *callbacks)
         success = this->write_to_fd(private_fd, private_file_path);
         if (! success) UNIVERSAL_LOG("write_to_fd() failed");
     }
-    
+
     if (success)
     {
         /* Ensure we maintain ownership and permissions (#2176) */
         struct stat sbuf;
         if (wstat(vars_path, &sbuf) >= 0)
         {
-            fchown(private_fd, sbuf.st_uid, sbuf.st_gid);
-            fchmod(private_fd, sbuf.st_mode);
+            if (fchown(private_fd, sbuf.st_uid, sbuf.st_gid) == -1)
+                UNIVERSAL_LOG("fchown() failed");
+            if (fchmod(private_fd, sbuf.st_mode) == -1)
+                UNIVERSAL_LOG("fchmod() failed");
         }
-        
+
         /* Linux by default stores the mtime with low precision, low enough that updates that occur in quick succession may
            result in the same mtime (even the nanoseconds field). So manually set the mtime of the new file to a high-precision
            clock. Note that this is only necessary because Linux aggressively reuses inodes, causing the ABA problem; on other
            platforms we tend to notice the file has changed due to a different inode (or file size!)
-         
+
            It's probably worth finding a simpler solution to this. The tests ran into this, but it's unlikely to affect users.
          */
 #if HAVE_CLOCK_GETTIME && HAVE_FUTIMENS
@@ -948,7 +960,7 @@ var_table_t env_universal_t::read_message_internal(int fd)
             // Process it if it's a newline (which is true if we are before the end of the buffer)
             if (cursor < bufflen && ! line.empty())
             {
-                if (utf8_to_wchar_string(line, &wide_line))
+                if (utf8_to_wchar(line.data(), line.size(), &wide_line, 0))
                 {
                     env_universal_t::parse_message_internal(wide_line, &result, &storage);
                 }
@@ -1200,11 +1212,11 @@ class universal_notifier_shmem_poller_t : public universal_notifier_t
             {
                 int err = errno;
                 report_error(err, L"Unable to memory map shared memory object with path '%s'", path);
-                region = NULL;
+                this->region = NULL;
             }
             else
             {
-                region = static_cast<universal_notifier_shmem_t*>(addr);
+                this->region = static_cast<universal_notifier_shmem_t*>(addr);
             }
         }
         
@@ -1444,7 +1456,7 @@ class universal_notifier_named_pipe_t : public universal_notifier_t
     }
     
     public:
-    universal_notifier_named_pipe_t(const wchar_t *test_path) : pipe_fd(-1), readback_time_usec(0), readback_amount(0), polling_due_to_readable_fd(false), drain_if_still_readable_time_usec(0)
+    explicit universal_notifier_named_pipe_t(const wchar_t *test_path) : pipe_fd(-1), readback_time_usec(0), readback_amount(0), polling_due_to_readable_fd(false), drain_if_still_readable_time_usec(0)
     {
         make_pipe(test_path);
     }

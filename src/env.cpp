@@ -294,16 +294,11 @@ static void handle_locale()
         _nl_msg_cat_cntr++;
 
         fish_dcgettext("fish", "Changing language to English", LC_MESSAGES);
-
-        if (get_is_interactive())
-        {
-            debug(2, _(L"Changing language to English"));
-        }
     }
 }
 
 
-/** React to modifying hte given variable */
+/** React to modifying the given variable */
 static void react_to_variable_change(const wcstring &key)
 {
     if (var_is_locale(key))
@@ -318,6 +313,10 @@ static void react_to_variable_change(const wcstring &key)
     else if (string_prefixes_string(L"fish_color_", key))
     {
         reader_react_to_color_change();
+    }
+    else if (key == L"fish_escape_delay_ms")
+    {
+        update_wait_on_escape_ms();
     }
 }
 
@@ -382,6 +381,7 @@ int env_set_pwd()
     wchar_t *res = wgetcwd(dir_path, 4096);
     if (!res)
     {
+        debug(0, _(L"Could not determine current working directory. Is your locale set correctly?"));
         return 0;
     }
     env_set(L"PWD", dir_path, ENV_EXPORT | ENV_GLOBAL);
@@ -449,12 +449,17 @@ void env_init(const struct config_paths_t *paths /* or NULL */)
       is to insert valid data
     */
 
-    /*
-      Import environment variables
-    */
-    for (char **p = (environ ? environ : __environ); p && *p; p++)
+    /* Import environment variables. Walk backwards so that the first one out of any duplicates wins (#2784) */
+    wcstring key, val;
+    const char * const * envp = (environ ? environ : __environ);
+    size_t i = 0;
+    while (envp && envp[i])
     {
-        const wcstring key_and_val = str2wcstring(*p); //like foo=bar
+        i++;
+    }
+    while (i--)
+    {
+        const wcstring key_and_val = str2wcstring(envp[i]); //like foo=bar
         size_t eql = key_and_val.find(L'=');
         if (eql == wcstring::npos)
         {
@@ -464,9 +469,9 @@ void env_init(const struct config_paths_t *paths /* or NULL */)
         }
         else
         {
-            wcstring key = key_and_val.substr(0, eql);
+            key.assign(key_and_val, 0, eql);
             if (is_read_only(key) || is_electric(key)) continue;
-            wcstring val = key_and_val.substr(eql + 1);
+            val.assign(key_and_val, eql + 1, wcstring::npos);
             if (variable_is_colon_delimited_array(key))
             {
                 std::replace(val.begin(), val.end(), L':', ARRAY_SEP);
@@ -593,7 +598,6 @@ int env_set(const wcstring &key, const wchar_t *val, env_mode_flags_t var_mode)
 {
     ASSERT_IS_MAIN_THREAD();
     bool has_changed_old = has_changed_exported;
-    bool has_changed_new = false;
     int done=0;
 
     if (val && contains(key, L"PWD", L"HOME"))
@@ -685,7 +689,7 @@ int env_set(const wcstring &key, const wchar_t *val, env_mode_flags_t var_mode)
     else
     {
         // Determine the node
-
+        bool has_changed_new = false;
         env_node_t *preexisting_node = env_get_node(key);
         bool preexisting_entry_exportv = false;
         if (preexisting_node != NULL)
@@ -1315,7 +1319,6 @@ static void update_export_array_if_necessary(bool recalc)
     if (has_changed_exported)
     {
         std::map<wcstring, wcstring> vals;
-        size_t i;
 
         debug(4, L"env_export_arr() recalc");
 
@@ -1324,7 +1327,7 @@ static void update_export_array_if_necessary(bool recalc)
         if (uvars())
         {
             const wcstring_list_t uni = uvars()->get_names(true, false);
-            for (i=0; i<uni.size(); i++)
+            for (size_t i=0; i<uni.size(); i++)
             {
                 const wcstring &key = uni.at(i);
                 const env_var_t val = uvars()->get(key);
@@ -1443,3 +1446,5 @@ env_var_t env_vars_snapshot_t::get(const wcstring &key) const
 }
 
 const wchar_t * const env_vars_snapshot_t::highlighting_keys[] = {L"PATH", L"CDPATH", L"fish_function_path", NULL};
+
+const wchar_t * const env_vars_snapshot_t::completing_keys[] = {L"PATH", L"CDPATH", NULL};

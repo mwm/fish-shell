@@ -111,7 +111,7 @@ public:
     complete_flags_t flags;
 
     /* Construction. Note: defining these so that they are not inlined reduces the executable size. */
-    completion_t(const wcstring &comp, const wcstring &desc = wcstring(), string_fuzzy_match_t match = string_fuzzy_match_t(fuzzy_match_exact), complete_flags_t flags_val = 0);
+    explicit completion_t(const wcstring &comp, const wcstring &desc = wcstring(), string_fuzzy_match_t match = string_fuzzy_match_t(fuzzy_match_exact), complete_flags_t flags_val = 0);
     completion_t(const completion_t &);
     completion_t &operator=(const completion_t &);
 
@@ -124,6 +124,9 @@ public:
     /* If this completion replaces the entire token, prepend a prefix. Otherwise do nothing. */
     void prepend_token_prefix(const wcstring &prefix);
 };
+
+/** Sorts and remove any duplicate completions in the completion list, then puts them in priority order. */
+void completions_sort_and_prioritize(std::vector<completion_t> *comps);
 
 enum
 {
@@ -179,11 +182,17 @@ typedef uint32_t completion_request_flags_t;
       If \c condition is empty, the completion is always used.
   \param flags A set of completion flags
 */
+enum complete_option_type_t
+{
+    option_type_args_only, // no option
+    option_type_short, // -x
+    option_type_single_long, // -foo
+    option_type_double_long // --foo
+};
 void complete_add(const wchar_t *cmd,
                   bool cmd_is_path,
-                  wchar_t short_opt,
-                  const wchar_t *long_opt,
-                  int long_mode,
+                  const wcstring &option,
+                  complete_option_type_t option_type,
                   int result_mode,
                   const wchar_t *condition,
                   const wchar_t *comp,
@@ -199,18 +208,21 @@ void complete_set_authoritative(const wchar_t *cmd, bool cmd_type, bool authorit
 /**
   Remove a previously defined completion
 */
-void complete_remove(const wchar_t *cmd,
+void complete_remove(const wcstring &cmd,
                      bool cmd_is_path,
-                     wchar_t short_opt,
-                     const wchar_t *long_opt,
-                     int long_mode);
+                     const wcstring &option,
+                     complete_option_type_t type);
 
+/** Removes all completions for a given command */
+void complete_remove_all(const wcstring &cmd, bool cmd_is_path);
 
 /** Find all completions of the command cmd, insert them into out.
  */
+class env_vars_snapshot_t;
 void complete(const wcstring &cmd,
-              std::vector<completion_t> &comp,
-              completion_request_flags_t flags);
+              std::vector<completion_t> *out_comps,
+              completion_request_flags_t flags,
+              const env_vars_snapshot_t &vars);
 
 /**
    Return a list of all current completions.

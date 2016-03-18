@@ -838,14 +838,6 @@ bool reader_data_t::expand_abbreviation_as_necessary(size_t cursor_backtrack)
     return result;
 }
 
-/** Sorts and remove any duplicate completions in the list. */
-static void sort_and_make_unique(std::vector<completion_t> &l)
-{
-    sort(l.begin(), l.end(), completion_t::is_naturally_less_than);
-    l.erase(std::unique(l.begin(), l.end(), completion_t::is_alphabetically_equal_to), l.end());
-}
-
-
 void reader_reset_interrupted()
 {
     interrupted = 0;
@@ -1028,6 +1020,8 @@ void reader_init()
 
     /* Set the mode used for the terminal, initialized to the current mode */
     memcpy(&shell_modes, &terminal_mode_on_startup, sizeof shell_modes);
+    shell_modes.c_iflag &= ~ICRNL;    /* turn off mapping CR (\cM) to NL (\cJ) */
+    shell_modes.c_iflag &= ~INLCR;    /* turn off mapping NL (\cJ) to CR (\cM) */
     shell_modes.c_lflag &= ~ICANON;   /* turn off canonical mode */
     shell_modes.c_lflag &= ~ECHO;     /* turn off echo mode */
     shell_modes.c_iflag &= ~IXON;     /* disable flow control */
@@ -1043,6 +1037,20 @@ void reader_init()
     shell_modes.c_cc[VDSUSP] = _POSIX_VDISABLE;
 #endif
 #endif
+
+    // We don't use term_steal because this can fail if fd 0 isn't associated
+    // with a tty and this function is run regardless of whether stdin is tied
+    // to a tty. This is harmless in that case. We do it unconditionally
+    // because disabling ICRNL mode (see above) needs to be done at the
+    // earliest possible moment. Doing it here means it will be done within
+    // approximately 1 ms of the start of the shell rather than 250 ms (or
+    // more) when reader_interactive_init is eventually called.
+    //
+    // TODO: Remove this condition when issue #2315 and #1041 are addressed.
+    if (is_interactive_session)
+    {
+        tcsetattr(STDIN_FILENO, TCSANOW,&shell_modes);
+    }
 }
 
 
@@ -1471,18 +1479,6 @@ struct autosuggestion_context_t
         if (reader_thread_job_is_stale())
             return 0;
 
-        /* Try handling a special command like cd */
-        wcstring special_suggestion;
-        if (autosuggest_suggest_special(search_string, working_directory, special_suggestion))
-        {
-            this->autosuggestion = special_suggestion;
-            return 1;
-        }
-
-        /* Maybe cancel here */
-        if (reader_thread_job_is_stale())
-            return 0;
-
         // Here we do something a little funny
         // If the line ends with a space, and the cursor is not at the end,
         // don't use completion autosuggestions. It ends up being pretty weird seeing stuff get spammed on the right
@@ -1498,7 +1494,8 @@ struct autosuggestion_context_t
 
         /* Try normal completions */
         std::vector<completion_t> completions;
-        complete(search_string, completions, COMPLETION_REQUEST_AUTOSUGGESTION);
+        complete(search_string, &completions, COMPLETION_REQUEST_AUTOSUGGESTION, vars);
+        completions_sort_and_prioritize(&completions);
         if (! completions.empty())
         {
             const completion_t &comp = completions.at(0);
@@ -1610,9 +1607,9 @@ static void select_completion_in_direction(enum selection_direction_t dir)
 }
 
 /**
-  Flash the screen. This function only changed the color of the
-  current line, since the flash_screen sequnce is rather painful to
-  look at in most terminal emulators.
+  Flash the screen. This function changes the color of the
+  current line momentarily and sends a BEL to maybe flash the
+  screen or emite a sound, depending on how it is configured.
 */
 static void reader_flash()
 {
@@ -1625,6 +1622,7 @@ static void reader_flash()
     }
 
     reader_repaint();
+    writestr(L"\a");
 
     pollint.tv_sec = 0;
     pollint.tv_nsec = 100 * 1000000;
@@ -1672,34 +1670,13 @@ static bool reader_can_replace(const wcstring &in, int flags)
     return true;
 }
 
-/* Compare two completions, ordering completions with better match types first */
-bool compare_completions_by_match_type(const completion_t &a, const completion_t &b)
-{
-    /* Compare match types, unless both completions are prefix (#923) in which case we always want to compare them alphabetically */
-    if (a.match.type != fuzzy_match_prefix || b.match.type != fuzzy_match_prefix)
-    {
-        int match_compare = a.match.compare(b.match);
-        if (match_compare != 0)
-        {
-            return match_compare < 0;
-        }
-    }
-
-    /* Compare using file comparison */
-    return wcsfilecmp(a.completion.c_str(), b.completion.c_str()) < 0;
-}
-
 /* Determine the best match type for a set of completions */
 static fuzzy_match_type_t get_best_match_type(const std::vector<completion_t> &comp)
 {
     fuzzy_match_type_t best_type = fuzzy_match_none;
     for (size_t i=0; i < comp.size(); i++)
     {
-        const completion_t &el = comp.at(i);
-        if (el.match.type < best_type)
-        {
-            best_type = el.match.type;
-        }
+        best_type = std::min(best_type, comp.at(i).match.type);
     }
     /* If the best type is an exact match, reduce it to prefix match. Otherwise a tab completion will only show one match if it matches a file exactly. (see issue #959) */
     if (best_type == fuzzy_match_exact)
@@ -1707,25 +1684,6 @@ static fuzzy_match_type_t get_best_match_type(const std::vector<completion_t> &c
         best_type = fuzzy_match_prefix;
     }
     return best_type;
-}
-
-/* Order completions such that case insensitive completions come first. */
-static void prioritize_completions(std::vector<completion_t> &comp)
-{
-    fuzzy_match_type_t best_type = get_best_match_type(comp);
-
-    /* Throw out completions whose match types are less suitable than the best. */
-    size_t i = comp.size();
-    while (i--)
-    {
-        if (comp.at(i).match.type > best_type)
-        {
-            comp.erase(comp.begin() + i);
-        }
-    }
-
-    /* Sort the remainder */
-    sort(comp.begin(), comp.end(), compare_completions_by_match_type);
 }
 
 /**
@@ -3006,16 +2964,20 @@ static int can_read(int fd)
     return select(fd + 1, &fds, 0, 0, &can_read_timeout) == 1;
 }
 
-/**
-   Test if the specified character is in the private use area that
-   fish uses to store internal characters
-
-    Note: Allow U+F8FF because that's the Apple symbol, which is in the
-    OS X US keyboard layout.
-*/
+// Test if the specified character is in a range that fish uses interally to
+// store special tokens.
+//
+// NOTE: This is used when tokenizing the input. It is also used when reading
+// input, before tokenization, to replace such chars with REPLACEMENT_WCHAR if
+// they're not part of a quoted string. We don't want external input to be able
+// to feed reserved characters into our lexer/parser or code evaluator.
+//
+// TODO: Actually implement the replacement as documented above.
 static int wchar_private(wchar_t c)
 {
-    return ((c >= 0xe000) && (c < 0xf8ff));
+    return ((c >= RESERVED_CHAR_BASE && c < RESERVED_CHAR_END) ||
+            (c >= ENCODE_DIRECT_BASE && c < ENCODE_DIRECT_END) ||
+            (c >= INPUT_COMMON_BASE && c < INPUT_COMMON_END));
 }
 
 /**
@@ -3355,11 +3317,11 @@ const wchar_t *reader_readline(int nchars)
                     const wcstring buffcpy = wcstring(cmdsub_begin, token_end);
 
                     //fprintf(stderr, "Complete (%ls)\n", buffcpy.c_str());
-                    data->complete_func(buffcpy, comp, COMPLETION_REQUEST_DEFAULT | COMPLETION_REQUEST_DESCRIPTIONS | COMPLETION_REQUEST_FUZZY_MATCH);
+                    complete_flags_t complete_flags = COMPLETION_REQUEST_DEFAULT | COMPLETION_REQUEST_DESCRIPTIONS | COMPLETION_REQUEST_FUZZY_MATCH;
+                    data->complete_func(buffcpy, &comp, complete_flags, env_vars_snapshot_t::current());
 
                     /* Munge our completions */
-                    sort_and_make_unique(comp);
-                    prioritize_completions(comp);
+                    completions_sort_and_prioritize(&comp);
 
                     /* Record our cycle_command_line */
                     data->cycle_command_line = el->text;
@@ -4300,9 +4262,10 @@ static int read_ni(int fd, const io_chain_t &io)
         }
 
         parse_error_list_t errors;
-        if (! parse_util_detect_errors(str, &errors, false /* do not accept incomplete */))
+        parse_node_tree_t tree;
+        if (! parse_util_detect_errors(str, &errors, false /* do not accept incomplete */, &tree))
         {
-            parser.eval(str, io, TOP);
+            parser.eval_acquiring_tree(str, io, TOP, moved_ref<parse_node_tree_t>(tree));
         }
         else
         {

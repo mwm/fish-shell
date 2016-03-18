@@ -22,6 +22,8 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 
 #include "config.h"
 
+#include <assert.h>
+#include <getopt.h>
 #include <limits.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -38,15 +40,9 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include <sys/socket.h> // IWYU pragma: keep - suggests internal header
 #include <sys/un.h>
 #include <pwd.h>
-
-#ifdef HAVE_GETOPT_H
-#include <getopt.h>
-#endif
-
 #include <locale.h>
 
 #include "fallback.h" // IWYU pragma: keep
-
 #include "common.h"
 #include "reader.h"
 #include "builtin.h"
@@ -63,16 +59,13 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "input.h"
 #include "io.h"
 #include "fish_version.h"
+#include "input_common.h"
+#include "wildcard.h"
 
 /* PATH_MAX may not exist */
 #ifndef PATH_MAX
 #define PATH_MAX 1024
 #endif
-
-/**
-   The string describing the single-character options accepted by the main fish binary
-*/
-#define GETOPT_STRING "+hilnvc:p:d:"
 
 /* If we are doing profiling, the filename to output to */
 static const char *s_profiling_output_filename = NULL;
@@ -221,12 +214,27 @@ static struct config_paths_t determine_config_directory_paths(const char *argv0)
     return paths;
 }
 
-/* Source the file config.fish in the given directory */
+// Source the file config.fish in the given directory.
 static void source_config_in_directory(const wcstring &dir)
 {
-    /* We want to execute a command like 'builtin source dir/config.fish 2>/dev/null' */
+    // If the config.fish file doesn't exist or isn't readable silently return.
+    // Fish versions up thru 2.2.0 would instead try to source the file with
+    // stderr redirected to /dev/null to deal with that possibility.
+    //
+    // This introduces a race condition since the readability of the file can
+    // change between this test and the execution of the 'source' command.
+    // However, that is not a security problem in this context so we ignore it.
+    const wcstring config_pathname = dir + L"/config.fish";
     const wcstring escaped_dir = escape_string(dir, ESCAPE_ALL);
-    const wcstring cmd = L"builtin source " + escaped_dir + L"/config.fish 2>/dev/null";
+    const wcstring escaped_pathname = escaped_dir + L"/config.fish";
+    if (waccess(config_pathname, R_OK) != 0) {
+        debug(2, L"not sourcing %ls (not readable or does not exist)",
+                escaped_pathname.c_str());
+        return;
+    }
+    debug(2, L"sourcing %ls", escaped_pathname.c_str());
+
+    const wcstring cmd = L"builtin source " + escaped_pathname;
     parser_t &parser = parser_t::principal_parser();
     parser.set_is_within_fish_initialization(true);
     parser.eval(cmd, io_chain_t(), TOP);
@@ -350,52 +358,36 @@ static int read_init(const struct config_paths_t &paths)
   Parse the argument list, return the index of the first non-switch
   arguments.
  */
-static int fish_parse_opt(int argc, char **argv, std::vector<std::string> *out_cmds)
+static int fish_parse_opt(int argc, char **argv, std::vector<std::string> *cmds)
 {
-    int my_optind;
-    int force_interactive=0;
-    bool has_cmd = false;
-
-    while (1)
+    const char *short_opts = "+hilnvc:p:d:";
+    const struct option long_opts[] =
     {
-        static struct option
-                long_options[] =
-        {
-            { "command", required_argument, 0, 'c' },
-            { "debug-level", required_argument, 0, 'd' },
-            { "interactive", no_argument, 0, 'i' } ,
-            { "login", no_argument, 0, 'l' },
-            { "no-execute", no_argument, 0, 'n' },
-            { "profile", required_argument, 0, 'p' },
-            { "help", no_argument, 0, 'h' },
-            { "version", no_argument, 0, 'v' },
-            { 0, 0, 0, 0 }
-        }
-        ;
+        { "command", required_argument, NULL, 'c' },
+        { "debug-level", required_argument, NULL, 'd' },
+        { "interactive", no_argument, NULL, 'i' } ,
+        { "login", no_argument, NULL, 'l' },
+        { "no-execute", no_argument, NULL, 'n' },
+        { "profile", required_argument, NULL, 'p' },
+        { "help", no_argument, NULL, 'h' },
+        { "version", no_argument, NULL, 'v' },
+        { NULL, 0, NULL, 0 }
+    };
 
-        int opt_index = 0;
-
-        int opt = getopt_long(argc,
-                              argv,
-                              GETOPT_STRING,
-                              long_options,
-                              &opt_index);
-
-        if (opt == -1)
-            break;
-
+    int opt;
+    while ((opt = getopt_long(argc, argv, short_opts, long_opts, NULL)) != -1)
+    {
         switch (opt)
         {
             case 0:
             {
-                break;
+                fwprintf(stderr, _(L"getopt_long() unexpectedly returned zero\n"));
+                exit_without_destructors(127);
             }
 
             case 'c':
             {
-                out_cmds->push_back(optarg ? optarg : "");
-                has_cmd = true;
-                is_interactive_session = 0;
+                cmds->push_back(optarg);
                 break;
             }
 
@@ -421,26 +413,25 @@ static int fish_parse_opt(int argc, char **argv, std::vector<std::string> *out_c
 
             case 'h':
             {
-                out_cmds->push_back("__fish_print_help fish");
-                has_cmd = true;
+                cmds->push_back("__fish_print_help fish");
                 break;
             }
 
             case 'i':
             {
-                force_interactive = 1;
+                is_interactive_session = 1;
                 break;
             }
 
             case 'l':
             {
-                is_login=1;
+                is_login = 1;
                 break;
             }
 
             case 'n':
             {
-                no_exec=1;
+                no_exec = 1;
                 break;
             }
 
@@ -453,49 +444,51 @@ static int fish_parse_opt(int argc, char **argv, std::vector<std::string> *out_c
 
             case 'v':
             {
-                fwprintf(stderr,
-                         _(L"%s, version %s\n"),
-                         PACKAGE_NAME,
+                fwprintf(stderr, _(L"%s, version %s\n"), PACKAGE_NAME,
                          get_fish_version());
                 exit_without_destructors(0);
             }
 
-            case '?':
+            default:
             {
+                // We assume getopt_long() has already emitted a diagnostic msg.
                 exit_without_destructors(1);
             }
 
         }
     }
 
-    my_optind = optind;
+    // If our command name begins with a dash that implies we're a login shell.
+    is_login |= argv[0][0] == '-';
 
-    is_login |= (strcmp(argv[0], "-fish") == 0);
-
-    /* We are an interactive session if we are either forced, or have not been given an explicit command to execute and stdin is a tty. */
-    if (force_interactive)
+    // We are an interactive session if we have not been given an explicit
+    // command or file to execute and stdin is a tty. Note that the -i or
+    // --interactive options also force interactive mode.
+    if (cmds->size() == 0 && optind == argc && isatty(STDIN_FILENO))
     {
-        is_interactive_session = true;
-    }
-    else if (is_interactive_session)
-    {
-        is_interactive_session = ! has_cmd && (my_optind == argc) && isatty(STDIN_FILENO);
+        is_interactive_session = 1;
     }
 
-    return my_optind;
+    return optind;
 }
 
-extern int g_fork_count;
 int main(int argc, char **argv)
 {
     int res=1;
     int my_optind=0;
 
+    // We can't do this at compile time due to the use of enum symbols.
+    assert(EXPAND_SENTINAL >= EXPAND_RESERVED_BASE &&
+           EXPAND_SENTINAL <= EXPAND_RESERVED_END);
+    assert(ANY_SENTINAL >= WILDCARD_RESERVED_BASE &&
+           ANY_SENTINAL <= WILDCARD_RESERVED_END);
+    assert(R_SENTINAL >= INPUT_COMMON_BASE &&
+           R_SENTINAL <= INPUT_COMMON_END);
+
     set_main_thread();
     setup_fork_guards();
 
     wsetlocale(LC_ALL, L"");
-    is_interactive_session=1;
     program_name=L"fish";
 
     //struct stat tmp;
@@ -539,7 +532,7 @@ int main(int argc, char **argv)
     const io_chain_t empty_ios;
     if (read_init(paths))
     {
-        /* Stop the exit status of any initialization commands (#635) */
+        /* Stomp the exit status of any initialization commands (#635) */
         proc_set_last_status(STATUS_BUILTIN_OK);
 
         /* Run the commands specified as arguments, if any */
@@ -596,15 +589,8 @@ int main(int argc, char **argv)
                 }
 
                 const wcstring rel_filename = str2wcstring(file);
-                const wchar_t *abs_filename = wrealpath(rel_filename, NULL);
 
-                if (!abs_filename)
-                {
-                    abs_filename = wcsdup(rel_filename.c_str());
-                }
-
-                reader_push_current_filename(intern(abs_filename));
-                free((void *)abs_filename);
+                reader_push_current_filename(rel_filename.c_str());
 
                 res = reader_read(fd, empty_ios);
 
